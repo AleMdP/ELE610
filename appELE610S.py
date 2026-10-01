@@ -87,6 +87,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{_fileName}: (version {_version}) use Qt {QT_VERSION_STR}")
         self.camOn = False 
 
+        self.current_trigger_delay = 50.0
+
         self.lastEyeCount = -1 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.processVideoFrame)
@@ -97,7 +99,10 @@ class MainWindow(QMainWindow):
         
         self.imFrame.imageChanged.connect(self.setMenuItems)  # must connect before image is opened 
 
-        self.showMaximized() #We modified this so the window starts in full size haha
+        self.detectedCamModel = "Desconocido"
+        self.autoDetectCamera()
+
+        self.showMaximized() #We (Mauro and Alejandro) modified this so the window starts in full size haha
         
         if isinstance(fName, str) and len(fName):
             self.imFrame.openImageFileDlg(fName)
@@ -181,6 +186,12 @@ class MainWindow(QMainWindow):
         menu.addAction(a)
         a = self.qaCameraOff = QAction('Camera off', self)
         a.triggered.connect(self.cameraOff)
+        menu.addAction(a)
+
+        menu.addSeparator()
+
+        a = self.qaCameraInfo = QAction('Print camera info', self)
+        a.triggered.connect(self.printCameraInfo)
         menu.addAction(a)
 
     def populateOpenCV(self, menu):
@@ -306,12 +317,31 @@ class MainWindow(QMainWindow):
         a = self.qaDisk = QAction("Find disk", self)
         a.triggered.connect(self.findDisk)
         menu.addAction(a)
+
         a = self.qaRedSector = QAction("Find red sector", self)
         a.triggered.connect(self.findRedSector)
         menu.addAction(a)
-        a = self.qaFindSpeed = QAction("Find speed", self)
-        a.triggered.connect(self.findSpeed)
+
+        a = self.qaSetTrigger = QAction("Set Trigger Delay...", self)
+        a.triggered.connect(self.setTriggerWithDelayGUI)
         menu.addAction(a)
+
+        menu.addSeparator()
+
+        a = self.qaPrintCenter = QAction("Print disk center", self)
+        a.triggered.connect(self.printDiskCenter)
+        menu.addAction(a)
+
+        a = self.qaDarken = QAction("Make Image Darker (Low Exposure)", self)
+        a.setShortcut("Ctrl+D")
+        a.triggered.connect(self.captureAndDarken)
+        menu.addAction(a)
+
+        a = self.qaFindSpeed = QAction("Find speed", self)
+        a.triggered.connect(self.triggerCaptureAndSpeed)
+        menu.addAction(a)
+
+
 
     @pyqtSlot()
     def setMenuItems(self):
@@ -1027,6 +1057,8 @@ class MainWindow(QMainWindow):
         image_data.unlock()  # important action
         #
         if (A.size > 0): # ok 
+            A = self._resizeIf2048x1088(A)
+
             im = self.imFrame.image   
             if not im.isNull():
                 self.imFrame.prevImage = im   
@@ -1039,9 +1071,6 @@ class MainWindow(QMainWindow):
                 self.imFrame.imFile.setText(f"Image size (w,h) = ({im.width()},{im.height()})")
         else:  # empty image A
             print("showCameraImage(): no image in buffer") 
-
-
-    
 
     # *** The methods for UiS ELE610 Image Acquisition assignments  ***
 
@@ -1185,7 +1214,7 @@ class MainWindow(QMainWindow):
             self.imFrame.imFile.setText("Saved as task1_4_4d_histogram.png")
 
     def findFocus(self):
-            """2.3.b: Trigger autofocus and capture sequence to let lens settle (IA2)."""
+            """2.3.b: Trigger autofocus and capture sequence to let lens settle."""
             import time
             if ueyeExist and self.camOn:
                 print("findFocus(): Starting autofocus and stabilization routine")
@@ -1263,7 +1292,7 @@ class MainWindow(QMainWindow):
                 self.imFrame.imHead.setText("Edit Camera Info: Turn on the camera first.")
 
     def findBlackDots(self):
-        """2.3.c: Isolate black dots on dice using Value/Brightness channel thresholding (IA2)."""
+        """2.3.c: Isolate black dots on dice using Value/Brightness channel thresholding."""
         from PyQt6.QtGui import QImage
 
         im = self.imFrame.image
@@ -1312,7 +1341,7 @@ class MainWindow(QMainWindow):
             self.imFrame.imFile.setText(f"Size = ({qim.width()},{qim.height()})")
 
     def findDiceCircles(self):
-        """2.3.d: Detect circular dots on dice using Hough Circles (IA2)."""
+        """2.3.d: Detect circular dots on dice using Hough Circles."""
         im = self.imFrame.image
         if not im.isNull():
             self.imFrame.prevImage = im
@@ -1361,7 +1390,7 @@ class MainWindow(QMainWindow):
             self.imFrame.imFile.setText(f"Size = ({qim.width()},{qim.height()})")
 
     def toggleContinuousMode(self):
-        """2.3g: Starts or stops continuous mode (IA2)."""
+        """2.3g: Starts or stops continuous mode."""
         if self.timer.isActive():
             self.timer.stop()
             print("Continuous mode stopped.")
@@ -1375,36 +1404,8 @@ class MainWindow(QMainWindow):
             print("Continuous mode started.")
             self.imFrame.imHead.setText("Continuous mode started")
 
-    def processVideoFrame(self):
-        """2.3g: Captures frames continuously and only print on console when the number of eyes changes (IA2)."""
-        if ueyeExist and self.camOn:
-            imBuf = ImageBuffer()
-            self.cam.freeze_video(True)
-            retVal = ueye.is_WaitForNextImage(self.cam.handle(), 200, imBuf.mem_ptr, imBuf.mem_id)
-            
-            if retVal == ueye.IS_SUCCESS:
-                self.showCameraImage(ImageData(self.cam.handle(), imBuf))
-                
-                im = self.imFrame.image
-                if not im.isNull():
-                    A = qimage2np(im)
-                    if A.ndim == 3 and A.shape[2] >= 3:
-                        gray = cv2.cvtColor(A[:, :, :3], cv2.COLOR_RGB2GRAY)
-                    else:
-                        gray = A.copy()
-                    
-                    currentEyes = self.countEyesInArray(gray, updateScene=False)
-                    
-                    if currentEyes != self.lastEyeCount:
-                        print(f"Change detected: Eyes: {self.lastEyeCount} -> {currentEyes}")
-                        self.lastEyeCount = currentEyes
-                        self.imFrame.imHead.setText(f"Eyes detected: {currentEyes}")
-        
-        QApplication.processEvents()
-
-
     def findDices(self):
-        """2.3.e: Locate dice reliably based on dot density per bounding region (IA2)."""
+        """2.3.e: Locate dice reliably based on dot density per bounding region."""
         im = self.imFrame.image
         if not im.isNull():
             self.imFrame.prevImage = im
@@ -1469,7 +1470,7 @@ class MainWindow(QMainWindow):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
                 )
 
-            print(f"findDices(): There has been found {dice_count} dices.")
+            print(f"findDices(): It has been found {dice_count} dices.")
 
             rgb_output = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
             qim = np2qimage(rgb_output)
@@ -1479,7 +1480,7 @@ class MainWindow(QMainWindow):
             self.imFrame.imFile.setText(f"Size = ({qim.width()},{qim.height()})")
 
     def findEyes(self):
-        """2.3.e: Accurately locate each dice and count its corresponding eyes (IA2)."""
+        """2.3.e: Accurately locate each dice and count its corresponding eyes."""
         im = self.imFrame.image
         if not im.isNull():
             self.imFrame.prevImage = im
@@ -1575,7 +1576,7 @@ class MainWindow(QMainWindow):
     # *** (IA3) ***
 
     def colorDices(self):
-        """3.2.c, d, e: Find color and eyes."""
+        """3.2.c, d, e: Find color and eyes for each dice in image."""
         im = self.imFrame.image
         if not im.isNull():
             self.imFrame.prevImage = im
@@ -1605,7 +1606,7 @@ class MainWindow(QMainWindow):
             self.imFrame.imHead.setText(f"Detected {len(results)} dice(s)")
     
     def _detect_dice_color_robust(self, bgr_crop):
-        """3.2.c: Detects the color of the dice (IA3)."""
+        """3.2.c: Detects the color of the dice."""
         if bgr_crop.size == 0 or bgr_crop.shape[0] < 10 or bgr_crop.shape[1] < 10:
             return "Unknown"
 
@@ -1722,7 +1723,7 @@ class MainWindow(QMainWindow):
         return output, results_summary
 
     def processVideoFrame(self):
-        """3.2.g: Processes the video frames, printing only when the state changes."""
+        """3.2.g: Processes continuous video, drawing bounding boxes/colors and notifying changes."""
         if ueyeExist and self.camOn:
             imBuf = ImageBuffer()
             self.cam.freeze_video(True)
@@ -1741,9 +1742,20 @@ class MainWindow(QMainWindow):
                     current_str = str(results)
                     if getattr(self, 'last_dice_str', '') != current_str:
                         self.last_dice_str = current_str
-                        print("[VIDEO LIVE]:")
-                        for color, eyes in results:
-                            print(f"  {color} dice shows {eyes} eyes.")
+                        
+                        print("[VIDEO LIVE CHANGE DETECTED]:")
+                        if len(results) == 0:
+                            print("  No dice detected.")
+                            summary_txt = "No dice detected"
+                        else:
+                            summary_list = []
+                            for color, eyes in results:
+                                print(f"  {color} dice shows {eyes} eyes.")
+                                summary_list.append(f"{color}: {eyes} eyes")
+                            summary_txt = " | ".join(summary_list)
+                        
+                        if hasattr(self, 'imFrame'):
+                            self.imFrame.imHead.setText(f"Live: {summary_txt}")
 
                     rgb_out = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
                     qim = np2qimage(rgb_out)
@@ -1751,25 +1763,422 @@ class MainWindow(QMainWindow):
                     self.imFrame.showImageOnScene(qim)
 
         QApplication.processEvents()
-        
-    def findDisk(self):
-        """Find the large disk in the center of the image using ??.
+
+    def _resizeIf2048x1088(self, img_np):
         """
-        print("findDisk(..) function is not ready yet.")
+        If the NumPy input image has dimensions (1088, 2048), 
+        it automatically downsamples it to half (544, 1024).
+        """
+        if img_np is None or img_np.size == 0:
+            return img_np
+        
+        height, width = img_np.shape[:2]
+        if width == 2048 and height == 1088:
+            print("Resizing image automatically (2048x1088 to 1024x544)...")
+            img_np = cv2.resize(img_np, (1024, 544), interpolation=cv2.INTER_AREA)
+            
+        return img_np
+
+    def setTriggerWithDelayGUI(self):
+        """4.4.d: Adjusts the trigger delay from the GUI and saves the value to memory."""
+        if not (ueyeExist and self.camOn):
+            print("setTriggerWithDelayGUI(): Camera isn't on.")
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText("Turn on the image first")
+            return False
+
+        delay_ms, ok = QInputDialog.getDouble(
+            self, "Configure Trigger Hardware", 
+            "Enter the trigger delay time in ms:",
+            value=self.current_trigger_delay, min=0.0, max=1000.0, decimals=2
+        )
+        
+        if ok:
+            self.current_trigger_delay = delay_ms
+
+            ret_trig = ueye.is_SetExternalTrigger(self.cam.handle(), ueye.IS_SET_TRIGGER_HI_LO)
+            delay_us = int(delay_ms * 1000)
+            ret_delay = ueye.is_SetTriggerDelay(self.cam.handle(), delay_us)
+
+            if ret_trig == ueye.IS_SUCCESS and ret_delay == ueye.IS_SUCCESS:
+                msg = f"Trigger Hardware ON | Saved delay: {self.current_trigger_delay} ms"
+                print(f"setTriggerWithDelayGUI(): {msg}")
+                self.imFrame.imHead.setText(msg)
+                return True
+            else:
+                print(f"setTriggerWithDelayGUI(): Error when configuring. Trig={ret_trig}, Delay={ret_delay}")
+                return False
+        return False
+    
+    def findDisk(self):
+        """
+        4.2.d, 4.2.c & 4.4.b: Find the disk center/radius and clear outer pixels to black.
+        Automatically resize to 1024x544 if the dimensions are 2048x1088.
+        """
+        im = self.imFrame.image
+        if im.isNull():
+            print("findDisk(): No image loaded.")
+            return None
+
+        self.imFrame.prevImage = im
+        A = qimage2np(im)
+        A = self._resizeIf2048x1088(A)
+
+        if A.ndim == 3 and A.shape[2] >= 3:
+            gray = cv2.cvtColor(A[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = A.copy()
+
+        blurred = cv2.medianBlur(gray, 5)
+        
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=100,
+            param1=100, param2=30, minRadius=50, maxRadius=0
+        )
+
+        output = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if gray.ndim == 2 else A.copy()
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            cx, cy, r = circles[0, 0]
+            
+            mask = np.zeros_like(gray)
+            cv2.circle(mask, (cx, cy), r, 255, -1)
+            output[mask == 0] = 0
+
+            cv2.circle(output, (cx, cy), r, (0, 255, 0), 3)
+            cv2.circle(output, (cx, cy), 5, (0, 0, 255), -1)
+
+            print(f"findDisk(): Found disk with Center=({cx}, {cy}), Radius={r}")
+            
+            rgb_out = cv2.cvtColor(output, cv2.COLOR_BGR2RGB) if A.ndim == 3 else output
+            qim = np2qimage(rgb_out)
+            self.imFrame.image = qim
+            self.imFrame.showImageOnScene(qim)
+            self.imFrame.imHead.setText(f"Disk: Center=({cx},{cy}), Radius={r}")
+            return (cx, cy, r)
+        else:
+            h, w = gray.shape[:2]
+            cx, cy, r = w // 2, h // 2, min(w, h) // 2
+            print(f"findDisk(): No circle detected. Assuming center=({cx}, {cy})")
+            return (cx, cy, r)
         
     def findRedSector(self):
-        """Find red sector for disc in active image using ??.
         """
-        print("findRedSector(..) function is not ready yet.")
+        4.2.e & 4.4.c: Detects the red sector and calculates the absolute angle [0, 360).
+        Automatically resizes to 1024x544 if the image is 2048x1088, and applies an 
+        HSV filter that is more robust against lighting and scale variations.
+        """
+        im = self.imFrame.image
+        if im.isNull():
+            print("findRedSector(): No image avaiable.")
+            return None
+
+        A = qimage2np(im)
+        A = self._resizeIf2048x1088(A)
+
+        if A.ndim < 3 or A.shape[2] < 3:
+            print("findRedSector(): Image has to be RGB.")
+            return None
+
+        if A.ndim == 3 and A.shape[2] >= 3:
+            gray = cv2.cvtColor(A[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = A.copy()
+
+        blurred = cv2.medianBlur(gray, 5)
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=100,
+            param1=100, param2=30, minRadius=40, maxRadius=0
+        )
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            cx, cy = circles[0, 0][0], circles[0, 0][1]
+        else:
+            h, w = gray.shape[:2]
+            cx, cy = w // 2, h // 2
+
+        bgr = cv2.cvtColor(A[:, :, :3], cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+        lower_red1 = np.array([0, 40, 40])
+        upper_red1 = np.array([12, 255, 255])
+        
+        lower_red2 = np.array([150, 40, 40])
+        upper_red2 = np.array([180, 255, 255])
+
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        red_mask = cv2.bitwise_or(mask1, mask2)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_DILATE, kernel, iterations=1)
+
+        M = cv2.moments(red_mask)
+        if M["m00"] > 50:
+            rx = float(M["m10"] / M["m00"])
+            ry = float(M["m01"] / M["m00"])
+
+            dx = rx - cx
+            dy = ry - cy
+            angle_rad = np.arctan2(dy, dx)
+            angle_deg = np.degrees(angle_rad) % 360.0
+
+            output = bgr.copy()
+            cv2.circle(output, (int(rx), int(ry)), 6, (255, 0, 0), -1)
+            cv2.line(output, (cx, cy), (int(rx), int(ry)), (0, 255, 255), 2)
+
+            print(f"findRedSector(): Centroid=( {rx:.1f}, {ry:.1f} ), Angle={angle_deg:.2f}°")
+
+            rgb_out = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+            qim = np2qimage(rgb_out)
+            self.imFrame.image = qim
+            self.imFrame.showImageOnScene(qim)
+            self.imFrame.imHead.setText(f"Red sector angle: {angle_deg:.2f}°")
+            self.imFrame.imFile.setText(f"Size: (w,h) = ({qim.width()},{qim.height()})")
+            return angle_deg
+        else:
+            print("findRedSector(): No red sector detected. Verify image exposure.")
+            self.imFrame.imHead.setText("findRedSector(): No red sector detected")
+            return None
         
     def findSpeed(self):
-        """Find speed for disk using ??.
         """
-        print("findSpeed(..) function is not ready yet.")
+        4.1.i, 4.2.f & 4.4.e: Estimates angular velocity using active delay in memory.
+        """
+        angle = self.findRedSector()
+        if angle is None:
+            print("findSpeed(): Angle not valid.")
+            return None
 
+        td, ok1 = QInputDialog.getDouble(
+            self, "Disk speed", "Enter the trigger delay time in ms:",
+            value=self.current_trigger_delay, min=0.0, max=1000.0, decimals=2
+        )
+        if not ok1:
+            return None
+
+        self.current_trigger_delay = td
+
+        te, ok2 = QInputDialog.getDouble(
+            self, "Disk speed", "Enter the exposure time in ms: ",
+            value=5.0, min=0.1, max=500.0, decimals=2
+        )
+        if not ok2:
+            return None
+
+        theta_0 = 15.0
+
+        delta_theta = (angle - theta_0) % 360.0
+        effective_time = td + (te / 2.0)
+
+        if effective_time <= 0:
+            return None
+
+        omega_deg_ms = delta_theta / effective_time
+        rpm = omega_deg_ms * 200.0
+
+        print(f"\n--- ANGULAR VELOCITY CALCULATION ---")
+        print(f"  Measured angle (θ): {angle:.2f}°")
+        print(f"  Static angle (θ0): {theta_0:.2f}°")
+        print(f"  Delay used (td): {td:.2f} ms")
+        print(f"  Exposure time (te): {te:.2f} ms")
+        print(f"  Angular velocity (ω): {omega_deg_ms:.4f} °/ms")
+        print(f"  Disk speed: {rpm:.2f} RPM")
+        print("------------------------------------\n")
+
+        self.imFrame.imHead.setText(f"Speed: {rpm:.2f} RPM (ω = {omega_deg_ms:.2f} °/ms)")
+        self.imFrame.imFile.setText(f"Parameters: td={td}ms, te={te}ms, θ={angle:.1f}°")
+        return rpm
+
+    # Additional functions
+
+    def makeImageDarker(self, factor=0.6):
+        """
+        Darkens the image.
+        """
+        im = self.imFrame.image
+        if im.isNull():
+            print("makeImageDarker(): No image loaded.")
+            return
+
+        self.imFrame.prevImage = im
+        A = qimage2np(im)
+
+        A_dark = (A.astype(np.float32) * factor).clip(0, 255).astype(np.uint8)
+
+        qim = np2qimage(A_dark)
+        self.imFrame.image = qim
+        self.imFrame.showImageOnScene(qim)
+        self.imFrame.imHead.setText(f"Brightness adjusted (Factor: {factor:.2f})")
+        self.imFrame.imFile.setText(f"Size: (w,h) = ({qim.width()},{qim.height()})")
+        print(f"makeImageDarker(): Brightness reduced with factor {factor}")
+
+    def captureAndDarken(self):
+        """
+        4.4: Allows choosing the dimming level via a popup or adjusting 
+        the camera exposure time without turning off the image.
+        """
+        if ueyeExist and self.camOn:
+            exp_curr = ueye.double()
+            ueye.is_Exposure(self.cam.handle(), ueye.IS_EXPOSURE_CMD_GET_EXPOSURE, exp_curr, 8)
+            current_exp = float(exp_curr)
+
+            new_exp, ok = QInputDialog.getDouble(
+                self, "Adjust exposure (darken)",
+                "Camera exposure time (ms):",
+                value=max(2.0, current_exp * 0.5), min=0.5, max=50.0, decimals=2
+            )
+
+            if ok:
+                exp_to_set = ueye.double(new_exp)
+                retVal = ueye.is_Exposure(self.cam.handle(), ueye.IS_EXPOSURE_CMD_SET_EXPOSURE, exp_to_set, 8)
+                if retVal == ueye.IS_SUCCESS:
+                    print(f"captureAndDarken(): Exposure adjusted to {new_exp:.2f} ms")
+                self.getOneImage()
+        else:
+            factor_percent, ok = QInputDialog.getInt(
+                self, "Darken Image",
+                "Desired brightness (10% - 90%):",
+                value=60, min=10, max=90
+            )
+            if ok:
+                self.makeImageDarker(factor=factor_percent / 100.0)
+
+    def printDiskCenter(self):
+        """
+        Find the disk center in the image and print its coordinates (cx, cy) and radius to standard output.
+        """
+        im = self.imFrame.image
+        if im.isNull():
+            print("printDiskCenter(): No avaiable image.")
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText("No loaded image.")
+            return None
+
+        A = qimage2np(im)
+        A = self._resizeIf2048x1088(A)
+
+        if A.ndim == 3 and A.shape[2] >= 3:
+            gray = cv2.cvtColor(A[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = A.copy()
+
+        blurred = cv2.medianBlur(gray, 5)
+        
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=100,
+            param1=100, param2=30, minRadius=40, maxRadius=0
+        )
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            cx, cy, r = circles[0, 0]
+            
+            # Imprimir resultado en la salida estándar (Terminal / Consola)
+            print(f"\n--- DISK CENTER POSITION ---")
+            print(f"  Center X (cx) : {cx} px")
+            print(f"  Center Y (cy) : {cy} px")
+            print(f"  Radius (r)    : {r} px")
+            print("-------------------------------------\n")
+
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText(f"Disk center: ({cx}, {cy}), Radius: {r}")
+                self.imFrame.imFile.setText(f"cx={cx}, cy={cy}, r={r}")
+
+            return (cx, cy, r)
+        else:
+            h, w = gray.shape[:2]
+            cx, cy, r = w // 2, h // 2, min(w, h) // 2
+            print(f"\n[printDiskCenter]: Disk not detected with Hough. Assuming center=({cx}, {cy})\n")
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText(f"Assumed center: ({cx}, {cy})")
+            return (cx, cy, r)
+
+    def triggerCaptureAndSpeed(self):
+        """
+        4.4.f: Captures using the delay time currently configured in the GUI.
+        """
+        print(f"triggerCaptureAndSpeed(): Firing with the saved delay ({self.current_trigger_delay} ms)...")
+        if ueyeExist and self.camOn:
+            ueye.is_SetExternalTrigger(self.cam.handle(), ueye.IS_SET_TRIGGER_HI_LO)
+            delay_us = int(self.current_trigger_delay * 1000)
+            ueye.is_SetTriggerDelay(self.cam.handle(), delay_us)
+            
+            self.getOneImage()
+            self.findSpeed()
+        else:
+            print("triggerCaptureAndSpeed(): Turn on the camera first.")
+
+    def autoDetectCamera(self):
+        """
+        Detects if an IDS (uEye) camera is connected, identifies the model, and automatically enables/disables GUI options.
+        """
+        print("autoDetectCamera(): Searching for connected IDS cameras...")
+        if not ueyeExist:
+            print("autoDetectCamera(): pyueye module is not avaiable.")
+            self.camOn = False
+            self.setMenuItems()
+            return False
+
+        num_cams = ueye.INT()
+        ret = ueye.is_GetNumberOfCameras(num_cams)
+
+        if ret == ueye.IS_SUCCESS and num_cams.value > 0:
+            cam_list = ueye.UEYE_CAMERA_LIST()
+            cam_list.dwCount = num_cams.value
+            
+            ret_list = ueye.is_GetCameraList(cam_list)
+            
+            cam_model = "Unknown"
+            cam_ser_no = "N/A"
+            cam_id = 1
+
+            if ret_list == ueye.IS_SUCCESS and cam_list.dwCount > 0:
+                info = cam_list.uci[0]
+                cam_model = info.Model.decode('utf-8', errors='ignore').strip()
+                cam_ser_no = info.SerNo.decode('utf-8', errors='ignore').strip()
+                cam_id = int(info.dwCameraID)
+
+            msg = f"Detected IDS camera: {cam_model} (S/N: {cam_ser_no}, ID: {cam_id})"
+            print(f"autoDetectCamera(): {msg}")
+
+            self.detectedCamModel = cam_model
+            self.detectedCamSerNo = cam_ser_no
+
+            if not self.camOn:
+                print("autoDetectCamera(): Turning on detected camera...")
+                self.cameraOn()
+            else:
+                self.setMenuItems()
+
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText(f"Camera connected: {cam_model}")
+                self.imFrame.imFile.setText(f"Model: {cam_model} | Serial No: {cam_ser_no}")
+
+            return True
+
+        else:
+            msg = "No connected IDS camera was found."
+            print(f"autoDetectCamera(): {msg}")
+            
+            if self.camOn:
+                self.cameraOff()
+
+            self.detectedCamModel = "None"
+            self.setMenuItems()
+
+            if hasattr(self, 'imFrame'):
+                self.imFrame.imHead.setText("Camera IDS not detected")
+                self.imFrame.imFile.setText("Connect the USB device and try again")
+
+            return False
 
     def mousePressEvent(self, event):
-        """Just print which mouse button has been pressed in main window.
+        """
+        Just print which mouse button has been pressed in main window.
         Note that the frame catches most mouse events, so this does only happen
         when mouse is on the bottom of the main window
         Normally we are fine if this function does nothing.
